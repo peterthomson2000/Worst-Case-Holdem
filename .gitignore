@@ -1,0 +1,29 @@
+# Ignore Windows user profile directories and system files
+Application Data/
+Cookies/
+Local Settings/
+My Documents/
+NetHood/
+PrintHood/
+Recent/
+SendTo/
+Start Menu/
+Templates/
+AppData/
+Contacts/
+Desktop/
+Documents/
+Downloads/
+Favorites/
+Links/
+Music/
+OneDrive/
+Pictures/
+Saved Games/
+Searches/
+Videos/
+NTUSER.DAT*
+ntuser.dat*
+ntuser.ini
+.windsurf/
+.codeium/
