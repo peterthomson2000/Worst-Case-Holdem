@@ -3,6 +3,8 @@ import csv
 import argparse
 from collections import Counter
 
+from worst_case_holdem import classify_worst_case_hand, WorstCaseHandType
+
 # Card representation: (rank, suit)
 # ranks: 2-14 (where 14 = Ace)
 # suits: 0-3 (we don't care which is which, just equality)
@@ -24,9 +26,23 @@ HAND_TYPES = [
     "Royal Flush",
 ]
 
+# Worst Case Hold'em labels ordered by WorstCaseHandType (1..10)
+WORST_CASE_HAND_TYPES = [
+    "Low Card",             # 1: LOW_CARD
+    "Broken Pair",          # 2: BROKEN_PAIR
+    "Faux Flush",           # 3: FAUX_FLUSH
+    "Mirror Hand",          # 4: MIRROR_HAND
+    "Color Disassociate",   # 5: COLOR_DISASSOCIATE (all four suits present)
+    "Gap",                  # 6: GAP (strict +2 step sequence)
+    "Almost Full House",    # 7: ALMOST_FULL_HOUSE
+    "Color Clash",          # 8: COLOR_CLASH
+    "Dead Royal",           # 9: DEAD_ROYAL
+    "Perfect Misdeal",      # 10: PERFECT_MISDEAL
+]
+
 
 def best_five_of_seven(cards):
-    """Return best 5-card hand score and hand type index from 7 cards.
+    """Return best 5-card *standard* hand score and hand type index from 7 cards.
 
     Score is a tuple where higher is better and comparable between hands.
     """
@@ -45,6 +61,34 @@ def best_five_of_seven(cards):
             best_type_idx = type_idx
 
     return best_score, best_type_idx
+
+
+def best_five_of_seven_worstcase(cards):
+    """Return best 5-card hand under Worst Case Hold'em ranking.
+
+    Uses classify_worst_case_hand to rank 5-card subsets by WorstCaseHandType.
+    The score tuple is (worstcase_category,), where higher is more "unlucky".
+    """
+    assert len(cards) == 7
+
+    from itertools import combinations
+
+    best_type: WorstCaseHandType | None = None
+
+    for combo in combinations(cards, 5):
+        eval_result = classify_worst_case_hand(combo)
+        wc_type = eval_result.hand_type
+        if wc_type is None:
+            continue
+        if best_type is None or wc_type > best_type:
+            best_type = wc_type
+
+    if best_type is None:
+        # If nothing matched any explicit pattern, treat as LOW_CARD.
+        best_type = WorstCaseHandType.LOW_CARD
+
+    # Score is just the enum value; used only for comparing between players.
+    return (int(best_type),), best_type
 
 
 def evaluate_5card_hand(cards):
@@ -167,14 +211,35 @@ def evaluate_5card_hand(cards):
     return score, hand_type_idx
 
 
-def simulate(num_players_list, num_trials_per_player_count=50000, csv_filename="holdem_sim_results.csv", md_filename=None):
+def simulate(
+    num_players_list,
+    num_trials_per_player_count=50000,
+    csv_filename="holdem_sim_results.csv",
+    md_filename=None,
+    variant="standard",
+):
     """Run simulations for given list of player counts and write CSV (and optional markdown) with results.
 
     For each number of players N and focal player (seat 0):
       - Estimate probability of each final hand type for hero
       - Estimate probability hero wins given that hand type
       - Estimate overall hero win probability
+
+    Parameters
+    ----------
+    variant : {"standard", "worstcase"}
+        - "standard": use normal Texas Hold'em hand detection and names
+          (High Card, One Pair, ..., Royal Flush).
+        - "worstcase": use the custom Worst Case Hold'em 5-card evaluator
+          (Gap, Color Associate, Broken Pair, Faux Flush, ..., Perfect Misdeal)
+          both for ranking hands and for naming them.
     """
+
+    if variant not in ("standard", "worstcase"):
+        raise ValueError("variant must be 'standard' or 'worstcase'")
+
+    hand_type_labels = HAND_TYPES if variant == "standard" else WORST_CASE_HAND_TYPES
+
     fieldnames = [
         "num_players",
         "hand_type",
@@ -213,18 +278,31 @@ def simulate(num_players_list, num_trials_per_player_count=50000, csv_filename="
 
                 # Evaluate each player's best hand
                 scores = []
-                type_indices = []
+                type_infos = []  # standard: type index; worstcase: WorstCaseHandType
                 for i in range(num_players):
                     seven_cards = hands[i] + community
-                    score, type_idx = best_five_of_seven(seven_cards)
-                    scores.append(score)
-                    type_indices.append(type_idx)
+                    if variant == "standard":
+                        score, type_idx = best_five_of_seven(seven_cards)
+                        scores.append(score)
+                        type_infos.append(type_idx)
+                    else:
+                        score, wc_type = best_five_of_seven_worstcase(seven_cards)
+                        scores.append(score)
+                        type_infos.append(wc_type)
 
                 # Determine winner(s)
                 best_score = max(scores)
                 winners = [i for i, s in enumerate(scores) if s == best_score]
 
-                hero_type = HAND_TYPES[type_indices[0]]
+                if variant == "standard":
+                    base_type_idx = type_infos[0]
+                    hero_type = hand_type_labels[base_type_idx]
+                else:
+                    hero_wc_type: WorstCaseHandType = type_infos[0]
+                    # Enum values start at 1 and are in the same logical order as
+                    # WORST_CASE_HAND_TYPES.
+                    hero_type = WORST_CASE_HAND_TYPES[int(hero_wc_type) - 1]
+
                 hero_type_counts[hero_type] += 1
 
                 # Hero equity for this deal (1 if sole winner, fractional if tie on top, 0 if loses)
@@ -250,7 +328,7 @@ def simulate(num_players_list, num_trials_per_player_count=50000, csv_filename="
             }
 
             # Write a row per hand type
-            for hand_type in HAND_TYPES:
+            for hand_type in hand_type_labels:
                 count = float(hero_type_counts[hand_type])
                 if count > 0:
                     hand_prob = count / total_deals
@@ -279,7 +357,8 @@ def simulate(num_players_list, num_trials_per_player_count=50000, csv_filename="
     # Optionally write markdown summary file
     if md_filename:
         with open(md_filename, "w", encoding="utf-8") as md:
-            md.write("# Texas Hold'em Simulation Summary\n")
+            title_variant = "Texas Hold'em" if variant == "standard" else "Worst Case Hold'em"
+            md.write(f"# {title_variant} Simulation Summary\n")
             md.write(f"\n- Player counts simulated: {', '.join(str(n) for n in sorted(num_players_list))}\n")
             md.write(f"- Trials per player count: {num_trials_per_player_count}\n\n")
 
@@ -291,7 +370,7 @@ def simulate(num_players_list, num_trials_per_player_count=50000, csv_filename="
                 md.write("| Hand Type | P(hand) | P(win | hand) | P(hand & win) |\n")
                 md.write("|----------|---------|--------------|----------------|\n")
 
-                for hand_type in HAND_TYPES:
+                for hand_type in hand_type_labels:
                     stats = md_summary[num_players]["hands"][hand_type]
                     md.write(
                         f"| {hand_type} | {stats['hand_prob'] * 100:.3f}% | "
@@ -303,7 +382,7 @@ def simulate(num_players_list, num_trials_per_player_count=50000, csv_filename="
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simulate Texas Hold'em hand odds vs number of players.")
+    parser = argparse.ArgumentParser(description="Simulate Hold'em hand odds vs number of players.")
     parser.add_argument(
         "-t",
         "--trials",
@@ -331,6 +410,13 @@ if __name__ == "__main__":
         default=None,
         help="Output markdown summary filename (default: same name as CSV but with .md)",
     )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        choices=["standard", "worstcase"],
+        default="standard",
+        help="Hand evaluation variant: 'standard' Texas Hold'em or 'worstcase' Worst Case Hold'em labels.",
+    )
 
     args = parser.parse_args()
 
@@ -341,5 +427,5 @@ if __name__ == "__main__":
         else:
             md_filename = args.csv + ".md"
 
-    simulate(args.players, args.trials, args.csv, md_filename)
+    simulate(args.players, args.trials, args.csv, md_filename, variant=args.variant)
     print(f"Simulation complete. Results written to {args.csv} and {md_filename}")
